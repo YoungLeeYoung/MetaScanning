@@ -1,0 +1,84 @@
+name: Daily Scan
+
+# 每天 UTC 01:00（北京时间 09:00）跑一次。
+# 注意：GitHub Actions 的 cron 用 UTC，且高峰期可能延迟几分钟到半小时。
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '要扫描的日期（YYYY-MM-DD，UTC）。留空则用今天。'
+        required: false
+      include_zero_star:
+        description: '连 0 star 的新项目一起扫（请求数会明显上升）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # 关键：SQLite 里存的是历史。没有这一步，每天都是全新开始，
+      # star 走势和反馈学到的权重就积累不下来。
+      - name: 恢复历史数据库
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: metascan-db-${{ github.run_id }}
+          restore-keys: |
+            metascan-db-
+
+      - name: 环境自检
+        run: node --disable-warning=ExperimentalWarning bin/metascan.mjs doctor --no-network --json
+
+      - name: 执行扫描
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.METASCAN_BASE_URL }}
+          METASCAN_MODEL: ${{ vars.METASCAN_MODEL }}
+          METASCAN_DEEP_MODEL: ${{ vars.METASCAN_DEEP_MODEL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
+          if [ "${{ inputs.include_zero_star }}" = "true" ]; then ARGS="$ARGS --include-zero-star"; fi
+          node --disable-warning=ExperimentalWarning bin/metascan.mjs run $ARGS
+
+      # 刷一次 star 快照。放在扫描之后，这样 delta 反映的是当天盘中的变化。
+      - name: 刷新 star 快照
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node --disable-warning=ExperimentalWarning bin/metascan.mjs snapshot
+
+      - name: 上传日报
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest
+          path: out/
+          retention-days: 30
+
+      - name: 提交日报到仓库
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add out/
+          # 用 outcome 判断而不是 if 表达式，避免「没有变化」被当成失败
+          git diff --cached --quiet || git commit -m "chore: 日报 $(date -u +%Y-%m-%d)"
+          git push

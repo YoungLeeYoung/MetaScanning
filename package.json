@@ -1,0 +1,22 @@
+{
+  "name": "metascanning",
+  "version": "0.1.0",
+  "private": true,
+  "description": "每天扫描 GitHub 当天新建的项目，按你自己的兴趣画像过滤、打分、生成 digest，并持续追踪它们的 star 走势。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "metascan": "./bin/metascan.mjs"
+  },
+  "scripts": {
+    "scan": "node --disable-warning=ExperimentalWarning bin/metascan.mjs run",
+    "scan:offline": "node --disable-warning=ExperimentalWarning bin/metascan.mjs run --offline",
+    "demo": "node --disable-warning=ExperimentalWarning bin/metascan.mjs run --offline && node --disable-warning=ExperimentalWarning bin/metascan.mjs snapshot --offline && node --disable-warning=ExperimentalWarning bin/metascan.mjs run --offline",
+    "snapshot": "node --disable-warning=ExperimentalWarning bin/metascan.mjs snapshot",
+    "stats": "node --disable-warning=ExperimentalWarning bin/metascan.mjs stats",
+    "doctor": "node --disable-warning=ExperimentalWarning bin/metascan.mjs doctor",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.log
+
+# 本地数据库和日报：里面是你的历史数据和 star 走势，不需要提交
+data/*
+!data/.gitkeep
+out/*
+!out/.gitkeep
