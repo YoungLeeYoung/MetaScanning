@@ -9,6 +9,7 @@ import { createGitHubClient } from '../src/github.mjs';
 import { createLlmClient } from '../src/llm.mjs';
 import { openStore } from '../src/store.mjs';
 import { applyFeedback, describeWeights } from '../src/feedback.mjs';
+import { explainRepo, formatExplanation } from '../src/explain.mjs';
 import { formatChecks, runDoctor } from '../src/doctor.mjs';
 import {
   applyEnvFile,
@@ -35,6 +36,7 @@ ${color.bold('MetaScanning')} — 每天扫描 GitHub 新发布的项目，按�
   run          执行一次扫描，生成当日 digest
   snapshot     更新已收录项目的 star 数（积累时间序列）
   feedback     对某个项目反馈收藏/忽略/深挖，驱动兴趣权重学习
+  explain      拆解某个项目为什么被选中（或为什么被过滤掉）
   weights      查看当前学到的兴趣权重
   stats        查看本地数据库统计
   list         列出已收录的项目
@@ -58,6 +60,7 @@ ${color.bold('MetaScanning')} — 每天扫描 GitHub 新发布的项目，按�
   node bin/metascan.mjs run --max-requests 30      # 快速试一次真实扫描（约 1 分钟）
   node bin/metascan.mjs run --include-zero-star    # 连零 star 的新项目一起扫
   node bin/metascan.mjs feedback lumen-labs/tinytune --save
+  node bin/metascan.mjs explain lumen-labs/tinytune      # 分数是怎么来的
   node bin/metascan.mjs snapshot                   # 第二天再跑，就能看到 star 走势
 `;
 
@@ -139,6 +142,8 @@ async function main() {
       return cmdSnapshot({ config, cwd, day, values });
     case 'feedback':
       return cmdFeedback({ config, cwd, values, positionals });
+    case 'explain':
+      return cmdExplain({ config, cwd, values, positionals });
     case 'weights':
       return cmdWeights({ config, cwd, values });
     case 'stats':
@@ -367,6 +372,61 @@ function cmdFeedback({ config, cwd, values, positionals }) {
       console.log(`  ${bar} ${change.key.padEnd(34)} → ${change.value.toFixed(3)}`);
     }
     console.log(color.dim('  这些权重会直接参与下一次扫描的排序。'));
+  } finally {
+    store.close();
+  }
+}
+
+function cmdExplain({ config, cwd, values, positionals }) {
+  const fullName = positionals[1];
+  if (!fullName) {
+    log.error('用法：node bin/metascan.mjs explain <owner/repo>');
+    log.info(color.dim('先跑一次 scan，再用 list 看看有哪些项目可以解释。'));
+    process.exitCode = 2;
+    return;
+  }
+
+  const store = openStore({ dataDir: resolveFrom(cwd, config.output.dataDir) });
+  try {
+    const repo = store.getRepo(fullName);
+    if (!repo) {
+      log.error(`数据库里没有 ${fullName}。`);
+      log.info(color.dim('只有被 scan 收录过的项目才有评分记录。用 `list` 查看已收录的项目。'));
+      process.exitCode = 1;
+      return;
+    }
+
+    const explanation = explainRepo(repo, {
+      config,
+      weights: store.getWeights(),
+      authorStats: store.getAuthorStats(),
+      day: values.date ?? null,
+    });
+
+    const runDate = values.date ?? repo.firstSeenDate;
+    const savedScore = runDate ? store.getScore(fullName, runDate) : null;
+    const savedLlm = savedScore?.llm_json ? JSON.parse(savedScore.llm_json) : null;
+
+    if (values.json) {
+      console.log(
+        JSON.stringify(
+          {
+            fullName: repo.fullName,
+            filter: explanation.filterVerdict,
+            score: explanation.heuristic,
+            tags: explanation.tags,
+            fieldHits: explanation.fieldHits,
+            missedKeywords: explanation.missedKeywords,
+            savedLlm,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.log(formatExplanation(explanation, { savedScore, savedLlm }));
   } finally {
     store.close();
   }

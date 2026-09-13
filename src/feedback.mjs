@@ -29,7 +29,7 @@ export function applyFeedback({ store, config, fullName, action, note = null }) 
   const matches = matchInterests(repo, { config, weights: store.getWeights(), includeReadme: true });
   const hitMatches = matches.filter((m) => m.hits.length);
   const tags = hitMatches.map((m) => m.tag);
-  const keywords = hitMatches.flatMap((m) => m.hits);
+  const keywords = hitMatches.flatMap((m) => m.matchedKeywords);
 
   const target = FEEDBACK_TARGETS[action];
   const changes = [];

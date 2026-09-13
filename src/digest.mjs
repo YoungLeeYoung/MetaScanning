@@ -215,6 +215,23 @@ function renderCoverage({ report, funnel, config }) {
 
   const passedCount = Array.isArray(funnel.passed) ? funnel.passed.length : (funnel.passed ?? 0);
   lines.push(`- 过滤：${formatCount(report.uniqueRepos)} → ${formatCount(passedCount)}`);
+
+  const enrichment = report.enrichment;
+  if (enrichment) {
+    lines.push(
+      `- README 富化：${formatCount(enrichment.fetched)} 条成功` +
+        `${enrichment.noReadme ? `，${enrichment.noReadme} 条仓库本身就没有 README` : ''}` +
+        `${enrichment.reused ? `，${enrichment.reused} 条复用历史` : ''}` +
+        `${enrichment.failed ? `，${enrichment.failed} 条失败` : ''}`,
+    );
+    if (enrichment.skippedBudget) {
+      lines.push(
+        `- 因预算未富化：${enrichment.skippedBudget} 条，**已排除在本次排序之外**` +
+          `（没 README 的项目和有 README 的没法公平比较）`,
+      );
+    }
+  }
+
   const topReasons = Object.entries(funnel.byRule ?? {}).slice(0, 8);
   if (topReasons.length) {
     lines.push(`- 主要淘汰原因：${topReasons.map(([rule, n]) => `${rule} ${n}`).join(' · ')}`);
@@ -299,6 +316,7 @@ export function buildDigestPayload({ day, config, items, report, funnel, llmInfo
       truncatedShards: report.truncatedShards,
       unresolvedShards: report.unresolvedShards,
       budgetExhausted: report.budgetExhausted,
+      enrichment: report.enrichment ?? null,
       warnings: report.warnings ?? [],
     },
     funnel: {

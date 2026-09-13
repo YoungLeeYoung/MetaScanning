@@ -81,6 +81,29 @@ test('expandShard 先按体积拆，再按语言拆，最后停止', () => {
   assert.deepEqual(expandShard(byLanguage[0], { day: '2026-09-13', config }), []);
 });
 
+test('expandShard 不会往被排除的语言里展开（那部分是白花的请求）', () => {
+  const withExcludes = {
+    ...config,
+    excludes: { languages: ['Rust'] },
+  };
+  const [wide] = planShards({ day: '2026-09-13', config: withExcludes });
+  const bySize = expandShard(wide, { day: '2026-09-13', config: withExcludes });
+  const byLanguage = expandShard(bySize[0], { day: '2026-09-13', config: withExcludes });
+
+  assert.deepEqual(
+    byLanguage.map((s) => s.language),
+    ['Python'],
+    'Rust 已经被 excludes.languages 排除，没必要再花请求去拉',
+  );
+});
+
+test('所有语言都被排除时，该维度直接不再展开', () => {
+  const allExcluded = { ...config, excludes: { languages: ['Python', 'Rust'] } };
+  const [wide] = planShards({ day: '2026-09-13', config: allExcluded });
+  const bySize = expandShard(wide, { day: '2026-09-13', config: allExcluded });
+  assert.deepEqual(expandShard(bySize[0], { day: '2026-09-13', config: allExcluded }), []);
+});
+
 test('detectTruncation 区分「超过 1000 上限」和「翻页没翻完」', () => {
   const complete = detectTruncation({ totalCount: 300, fetchedCount: 300, reachedPageCap: false });
   assert.equal(complete.truncated, false);

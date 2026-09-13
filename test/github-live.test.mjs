@@ -377,6 +377,95 @@ test('预算很紧时优先保证搜索覆盖，同时给 README 留出余量', 
   assert.ok(result.enrichStats.fetched > 0, '富化阶段仍然要有预算可用');
 });
 
+test('预算不足时，没拿到 README 的候选退出排序，而不是和有 README 的混在一起比', async () => {
+  const dir = setupWorkspace();
+  const config = makeConfig();
+  // 搜索固定会用掉 8 次；总预算 11 → 富化只剩 3 次，而候选有 5 条
+  config.collection.maxRequests = 11;
+  const { fetchImpl } = fakeGitHub();
+
+  const result = await runScan({
+    day,
+    config,
+    cwd: dir,
+    offline: false,
+    githubFetchImpl: fetchImpl,
+    logger: silent,
+  });
+
+  assert.equal(result.enrichStats.fetched, 3);
+  assert.equal(result.enrichStats.skippedBudget, 2);
+  assert.equal(result.items.length, 3, '被跳过的候选不参与排序');
+  assert.ok(
+    result.items.every((item) => item.repo.readmeChars > 0),
+    '进了榜单的每一条都必须真的读过 README',
+  );
+  assert.ok(
+    result.warnings.some((w) => w.includes('排除在本次排序之外') && w.includes('maxRequests')),
+    `警告里应该给出可操作的预算建议，实际：${JSON.stringify(result.warnings)}`,
+  );
+
+  const markdown = fs.readFileSync(result.paths.markdown, 'utf8');
+  assert.match(markdown, /因预算未富化：2 条/);
+  const payload = JSON.parse(fs.readFileSync(result.paths.json, 'utf8'));
+  assert.equal(payload.coverage.enrichment.skippedBudget, 2);
+  assert.equal(payload.coverage.enrichment.excludedFromRanking, 2);
+});
+
+test('富化统计能被拆解干净（attempted = fetched + failed + noReadme）', async () => {
+  const dir = setupWorkspace();
+  const config = makeConfig();
+  // 让 one/edge-helper 的 README 返回 404，制造「仓库本身没有 README」的情况
+  const { fetchImpl } = fakeGitHub({ readmeText: '' });
+
+  const result = await runScan({
+    day,
+    config,
+    cwd: dir,
+    offline: false,
+    githubFetchImpl: fetchImpl,
+    logger: silent,
+  });
+
+  const e = result.report.enrichment;
+  assert.equal(e.fetched, 0, '空 README 不应该算成功');
+  assert.ok(e.noReadme > 0, '应该被记成「仓库本身没有 README」');
+  assert.equal(result.enrichStats.attempted, e.fetched + e.failed + e.noReadme);
+});
+
+test('富化到的 README 必须写进数据库，否则下一轮还要再花一次预算', async () => {
+  const dir = setupWorkspace();
+  const config = makeConfig();
+  const { fetchImpl } = fakeGitHub();
+
+  const result = await runScan({
+    day,
+    config,
+    cwd: dir,
+    offline: false,
+    githubFetchImpl: fetchImpl,
+    logger: silent,
+  });
+  assert.ok(result.enrichStats.fetched > 0);
+
+  const store = openStore({ dataDir: path.join(dir, 'data') });
+  const repo = store.getRepo('acme/edge-runner');
+  assert.ok(repo.readmeText, 'README 正文应该落库');
+  assert.ok(repo.readmeChars > 0, 'README 长度应该落库');
+
+  // 落库的意义就在这里：第二轮应该复用，而不是重新下载
+  const secondRun = await runScan({
+    day,
+    config,
+    cwd: dir,
+    offline: false,
+    githubFetchImpl: fetchImpl,
+    logger: silent,
+  });
+  assert.ok(secondRun.enrichStats.reused > 0, '第二轮应该命中复用，不再消耗请求');
+  store.close();
+});
+
 test('有 token 时用 GraphQL 批量刷新快照（1 次请求查多个仓库）', async () => {
   const dir = setupWorkspace();
   const config = makeConfig();

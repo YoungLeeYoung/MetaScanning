@@ -154,7 +154,8 @@ export async function runScan({
 
     /* --------------------------------------------- 5. README 富化 + 重评 */
     stageStart = Date.now();
-    let enrichStats = { attempted: 0, fetched: 0, reused: 0, failed: 0, skippedBudget: 0 };
+    let enrichStats = { attempted: 0, fetched: 0, reused: 0, failed: 0, noReadme: 0, skippedBudget: 0 };
+    let skippedFromRanking = [];
     let enrichedEntries = toEnrich;
 
     if (client && toEnrich.length) {
@@ -168,12 +169,29 @@ export async function runScan({
       logger.step(
         '富化',
         `README 新增 ${enrichStats.fetched}，复用 ${enrichStats.reused}，失败 ${enrichStats.failed}` +
+          `${enrichStats.noReadme ? `，仓库确实没有 README ${enrichStats.noReadme}` : ''}` +
           `${skipped ? `，因预算跳过 ${skipped}` : ''}`,
       );
+
       if (skipped > 0) {
+        /**
+         * 被预算跳过的候选不能继续参与排序。
+         * 有 README 的和没 README 的放在同一个榜单里比分数是不公平的——
+         * 后者少了一大块文本，质量分和兴趣分天生偏低，
+         * 而且它们的入选与否完全取决于前面 68 条谁先谁后，等于随机。
+         */
+        const skippedSet = new Set(enrichStats.skippedNames ?? []);
+        const kept = enrichedEntries.filter((entry) => !skippedSet.has(entry.repo.fullName));
+        if (kept.length > 0) {
+          skippedFromRanking = enrichedEntries.filter((entry) => skippedSet.has(entry.repo.fullName));
+          enrichedEntries = kept;
+        }
         extraNotes.push(
-          `有 ${skipped} 条候选因为请求预算不足没能拉取 README，它们的质量分和兴趣匹配都偏保守。` +
-            `调大 collection.maxRequests 或提高 collection.readmeReserveRatio 可以改善。`,
+          `有 ${skipped} 条候选因为请求预算不足没能拉取 README，已**排除在本次排序之外**` +
+            `（没 README 的项目和有 README 的没法公平比较）。` +
+            `本次搜索用了 ${report.searchRequests ?? '?'} 次请求；` +
+            `想让这 ${toEnrich.length} 条候选全部拿到 README，` +
+            `把 collection.maxRequests 提到 ${(report.searchRequests ?? 0) + toEnrich.length} 以上。`,
         );
       }
     }
@@ -294,7 +312,18 @@ export async function runScan({
     /* -------------------------------------------------- 8. 落库 + 快照 */
     stageStart = Date.now();
     const persistLimit = 5000;
-    const toPersist = funnel.passed.slice(0, persistLimit);
+    /**
+     * 落库时要用「富化之后」的那份数据。
+     *
+     * funnel.passed 是富化之前的快照，里面没有刚拉到的 README——
+     * 之前这里直接写 funnel.passed，结果是每天花几十次请求拉回来的 README
+     * 一个都没进数据库：explain 显示「没有拉到」，
+     * 而且第二天复用逻辑查不到东西，同样的钱再花一遍。
+     */
+    const enrichedByName = new Map(enrichedEntries.map((entry) => [entry.repo.fullName, entry.repo]));
+    const toPersist = funnel.passed
+      .slice(0, persistLimit)
+      .map((repo) => enrichedByName.get(repo.fullName) ?? repo);
     for (const repo of toPersist) {
       store.upsertRepo(repo, { runDate: day });
       store.snapshotRepo(repo.fullName, {
@@ -319,6 +348,16 @@ export async function runScan({
     timings.persistMs = Date.now() - stageStart;
 
     /* ---------------------------------------------------------- 9. 报告 */
+    report.enrichment = {
+      candidates: toEnrich.length,
+      fetched: enrichStats.fetched,
+      reused: enrichStats.reused,
+      failed: enrichStats.failed,
+      noReadme: enrichStats.noReadme,
+      skippedBudget: enrichStats.skippedBudget,
+      excludedFromRanking: skippedFromRanking.length,
+    };
+
     const generatedAt = new Date().toISOString();
     const markdown = renderDigest({
       day,

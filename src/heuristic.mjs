@@ -22,29 +22,68 @@ export const FEEDBACK_TARGETS = {
   ignore: -1.0,
 };
 
-export function buildHaystack(repo, { includeReadme = false, readmeChars = 4000 } = {}) {
-  const parts = [
-    repo.name,
-    repo.description,
-    ...(repo.topics ?? []),
-    repo.language,
-  ];
-  if (includeReadme && repo.readmeText) {
-    parts.push(truncate(repo.readmeText, readmeChars));
-  }
-  return normalizeText(parts.filter(Boolean).join(' \n '));
+/**
+ * 关键词出现在不同字段里，证据强度完全不同。
+ *
+ * topics 和仓库名是作者**主动声明**「我这个项目是什么」；
+ * description 次之；README 里出现某个词可能只是顺带提了一句——
+ * 一份 10KB 的文档里凑齐四五个技术名词太容易了。
+ *
+ * 早期版本把五个字段平权、并且 4 次命中就把兴趣分顶到 1.0，
+ * 实测下来 12 条精选里 9 条兴趣分在 0.98 以上——主维度完全失去了区分度。
+ * 给字段加权重，等于让「声明」比「提及」更有分量。
+ */
+export const FIELD_EVIDENCE_WEIGHT = {
+  name: 1.0,
+  topics: 1.0,
+  description: 0.8,
+  language: 0.3,
+  readme: 0.4,
+};
+
+export const FIELD_LABELS = {
+  name: '仓库名',
+  topics: 'topics 标签',
+  description: '描述',
+  language: '语言',
+  readme: 'README',
+};
+
+export function buildFields(repo, { includeReadme = false, readmeChars = 4000 } = {}) {
+  return {
+    name: normalizeText(repo.name),
+    topics: normalizeText((repo.topics ?? []).join(' ')),
+    description: normalizeText(repo.description),
+    language: normalizeText(repo.language),
+    readme: includeReadme ? normalizeText(truncate(repo.readmeText ?? '', readmeChars)) : '',
+  };
 }
+
+/** 兼容旧签名：把各字段拼成一个大字符串。 */
+export function buildHaystack(repo, { includeReadme = false, readmeChars = 4000 } = {}) {
+  const fields = buildFields(repo, { includeReadme, readmeChars });
+  return normalizeText(Object.values(fields).filter(Boolean).join(' \n '));
+}
+
+/**
+ * 证据量 → 强度的饱和曲线常数。
+ *
+ * strength = 1 - e^(-evidence / K)
+ * 越大越难拿高分。K=3 意味着：两个 topics 命中 ≈ 0.49，
+ * 四个 ≈ 0.74，八个 ≈ 0.93——想要满分就得真的有料，
+ * 而不是像旧公式那样命中四次就到顶。
+ */
+export const EVIDENCE_SATURATION_K = 3;
 
 /**
  * 统计每个兴趣点命中多少关键词。
  * learnedBoost 来自反馈表：你点过 save/deep 的标签会被放大，ignore 过的会被压低。
  */
 export function matchInterests(repo, { config, weights = new Map(), includeReadme = false }) {
-  const haystack = buildHaystack(repo, { includeReadme });
+  const fields = buildFields(repo, { includeReadme });
   const results = [];
 
   for (const interest of config.interests) {
-    const rawHits = interest.keywords.filter((keyword) => includesKeyword(haystack, keyword));
     const learned = weights.get(`tag:${interest.tag}`)?.value ?? 0;
     const effectiveWeight = interest.weight * (1 + 0.6 * learned);
 
@@ -53,19 +92,43 @@ export function matchInterests(repo, { config, weights = new Map(), includeReadm
      * 「具体是 eval 还是 tokenizer 打动了我」——你反复忽略含某个词的条目后，
      * 那个词会自己沉下去，而不用你去改配置文件。
      */
-    const weightedHits = rawHits.reduce((sum, keyword) => {
+    const hits = [];
+    let evidence = 0;
+    for (const keyword of interest.keywords) {
+      const matchedFields = [];
+      let keywordEvidence = 0;
+      for (const [field, text] of Object.entries(fields)) {
+        if (!text || !includesKeyword(text, keyword)) continue;
+        matchedFields.push(field);
+        keywordEvidence = Math.max(keywordEvidence, FIELD_EVIDENCE_WEIGHT[field] ?? 0.3);
+      }
+      if (!matchedFields.length) continue;
       const kwLearned = weights.get(`kw:${keyword}`)?.value ?? 0;
-      return sum + Math.max(1 + 0.5 * kwLearned, 0.25);
-    }, 0);
+      // 反馈也能改变单个词的证据强度：被反复忽略的词，说了等于没说
+      const weighted = Math.max(keywordEvidence * (1 + 0.5 * kwLearned), 0.05);
+      evidence += weighted;
+      hits.push({
+        keyword,
+        fields: matchedFields,
+        fieldWeight: round(keywordEvidence, 2),
+        learned: round(kwLearned, 3),
+        weight: round(weighted, 3),
+      });
+    }
+
+    const strength = hits.length
+      ? clamp(1 - Math.exp(-evidence / EVIDENCE_SATURATION_K), 0, 1)
+      : 0;
 
     results.push({
       tag: interest.tag,
       weight: interest.weight,
       effectiveWeight: Math.max(effectiveWeight, 0.05),
       learned,
-      hits: rawHits,
-      weightedHits: round(weightedHits, 3),
-      strength: rawHits.length ? clamp(0.45 + 0.25 * (weightedHits - 1), 0, 1) : 0,
+      hits,
+      matchedKeywords: hits.map((hit) => hit.keyword),
+      evidence: round(evidence, 3),
+      strength,
     });
   }
 
@@ -74,32 +137,30 @@ export function matchInterests(repo, { config, weights = new Map(), includeReadm
 
 export function scoreQuality(repo) {
   const parts = {};
-  let score = 0;
+  /**
+   * 质量分刻意做成连续曲线而不是阶梯。
+   *
+   * 旧版本用「README >= 3000 字符就算满分、description >= 60 字符就给 0.2」这种阈值，
+   * 结果是把候选收窄到「都有一份像样 README」之后，这一项也集体顶到 1.0，
+   * 和兴趣分一起变成常数。改成对数刻度之后，
+   * 4KB 和 20KB 的 README 才拉得开差距。
+   */
+  const logScore = (value, floor, ceiling) => {
+    if (!value || value <= floor) return 0;
+    return clamp(Math.log10(value / floor) / Math.log10(ceiling / floor), 0, 1);
+  };
 
-  const descLength = (repo.description ?? '').length;
-  parts.description = descLength >= 60 ? 0.2 : descLength >= 20 ? 0.12 : descLength > 0 ? 0.05 : 0;
-  score += parts.description;
-
-  const topicCount = (repo.topics ?? []).length;
-  parts.topics = topicCount >= 4 ? 0.15 : topicCount >= 2 ? 0.1 : topicCount === 1 ? 0.05 : 0;
-  score += parts.topics;
-
+  parts.description = round(0.15 * logScore((repo.description ?? '').length, 20, 400), 4);
+  parts.topics = round(0.15 * clamp((repo.topics ?? []).length / 8, 0, 1), 4);
+  // license 和 demo 站点是二值信号，没有什么"程度"，保持原样
   parts.license = repo.license ? 0.1 : 0;
-  score += parts.license;
-
   parts.homepage = repo.homepage ? 0.15 : 0;
-  score += parts.homepage;
-
-  const readmeChars = repo.readmeChars ?? 0;
-  parts.readme =
-    readmeChars >= 3000 ? 0.25 : readmeChars >= 800 ? 0.17 : readmeChars >= 200 ? 0.1 : readmeChars > 0 ? 0.04 : 0;
-  score += parts.readme;
-
-  // 有 demo 站点 + 有 README 说明 + 有 license，基本可以确定是认真做的项目
+  parts.readme = round(0.3 * logScore(repo.readmeChars ?? 0, 200, 20000), 4);
+  // 创建之后又推送过：说明不是一次性 dump
   parts.freshness = repo.pushedAt && repo.createdAt && repo.pushedAt !== repo.createdAt ? 0.15 : 0;
-  score += parts.freshness;
 
-  return { score: clamp(score, 0, 1), parts };
+  const score = Object.values(parts).reduce((sum, value) => sum + value, 0);
+  return { score: clamp(round(score, 4), 0, 1), parts };
 }
 
 /** 早期动量：当天新建的仓库能拿到 star，本身就是最强的信号之一 */
@@ -175,16 +236,23 @@ export function scoreHeuristic(repo, { config, weights = new Map(), authorStats 
   const penalties = scorePenalties(repo);
   const penaltyTotal = penalties.reduce((sum, p) => sum + p.amount, 0);
 
+  /**
+   * 四个维度的权重可以调。这不是装饰性的开关：
+   * 「兴趣匹配」和「早期动量」之间的取舍，就是
+   * 「宁可多看几个还没人发现的」还是「优先看已经有验证的」这个价值判断，
+   * 只有你自己能决定，所以不该写死在代码里。
+   */
+  const dimensionWeights = { ...DEFAULT_WEIGHTS, ...(config?.ranking?.weights ?? {}) };
   const weighted =
-    DEFAULT_WEIGHTS.interest * interestScore +
-    DEFAULT_WEIGHTS.quality * quality.score +
-    DEFAULT_WEIGHTS.momentum * momentum.score +
-    DEFAULT_WEIGHTS.author * author.score;
+    dimensionWeights.interest * interestScore +
+    dimensionWeights.quality * quality.score +
+    dimensionWeights.momentum * momentum.score +
+    dimensionWeights.author * author.score;
 
   const total = clamp(weighted - penaltyTotal, 0, 1);
 
   const matchedTags = interestMatches.filter((m) => m.hits.length).map((m) => m.tag);
-  const matchedKeywords = interestMatches.flatMap((m) => m.hits);
+  const matchedKeywords = interestMatches.flatMap((m) => m.matchedKeywords);
 
   return {
     total: round(total, 4),
@@ -195,10 +263,12 @@ export function scoreHeuristic(repo, { config, weights = new Map(), authorStats 
       author: round(author.score, 4),
       penalty: round(penaltyTotal, 4),
     },
+    weights: dimensionWeights,
     detail: {
       interest: interestMatches.map((m) => ({
         tag: m.tag,
-        hits: m.hits,
+        hits: m.hits.map((hit) => hit.keyword),
+        evidence: m.evidence,
         strength: round(m.strength, 3),
         learned: round(m.learned, 3),
       })),
@@ -216,7 +286,7 @@ export function scoreHeuristic(repo, { config, weights = new Map(), authorStats 
 function buildRankReason({ interestMatches, momentum, penalties, author }) {
   const bits = [];
   const top = interestMatches.filter((m) => m.hits.length).sort((a, b) => b.strength - a.strength)[0];
-  if (top) bits.push(`关键词 ${top.hits.slice(0, 4).join('、')}`);
+  if (top) bits.push(`关键词 ${top.matchedKeywords.slice(0, 4).join('、')}`);
   if (momentum.score >= 0.5) bits.push('当天已有明显 star 增长');
   if (author.known && author.score >= 0.7) bits.push('作者此前收录过的项目表现不错');
   if (penalties.length) bits.push(penalties.map((p) => p.reason).join('；'));

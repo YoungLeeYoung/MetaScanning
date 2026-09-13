@@ -42,6 +42,8 @@ export function defaultConfig() {
       // 综合分低于这个值的不进精选，只列在「低置信度」里
       displayFloor: 0.45,
       minHeuristicScore: 0.16,
+      // 四个维度的权重，见 metascan.config.mjs 里的说明
+      weights: { interest: 0.45, quality: 0.25, momentum: 0.2, author: 0.1 },
     },
     llm: {
       enabled: false,

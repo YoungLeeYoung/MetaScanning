@@ -109,12 +109,29 @@ collection: { maxRequests: 240,          // 本次运行的总请求预算
               readmeReserveRatio: 0.25 },// 其中 25% 留给 README 富化
 ranking: { enrichLimit: 80,              // 最多拉多少条 README
            llmCandidateLimit: 40,        // 多少条进 LLM 打分
-           displayFloor: 0.45 },         // 综合分低于它的不进精选
+           displayFloor: 0.45,           // 综合分低于它的不进精选
+           weights: {                    // 四个维度的权重
+             interest: 0.45,             // 和你配置的方向有多契合
+             quality: 0.25,              // 文档 / license / demo 站点
+             momentum: 0.2,              // 当天拿到的 star、fork
+             author: 0.1,                // 这个作者以前收录过的表现
+           } },
 ```
+
+`weights` 是全项目最值得动手调的一项，因为它对应一个价值判断：
+`interest` 调高 → 更愿意看还没人发现的新项目，但噪音更多；
+`momentum` 调高 → 优先看当天已经有人验证过的，但会漏掉冷启动的好东西。
+默认偏兴趣一点，适合「自己先看到」的用法。如果觉得榜单被一堆 1 star 的关键词堆砌项目占满，
+就把 `momentum` 提到 0.35 左右。
 
 `readmeReserveRatio` 不建议调成 0。README 是质量分和兴趣匹配最主要的文本来源，
 如果搜索阶段把预算吃光，打分就退回成「只看标题和描述」，而你不会收到任何报错——
 只会觉得结果莫名地差。
+
+注意「富化」和「排序」的关系：**没拿到 README 的候选会被排除在本次排序之外**，
+而不是和有 README 的项目放在同一个榜单里比分数——后者少了一大块文本，
+质量分和兴趣分天生偏低，而且能不能入选取决于它排在第几个，等于随机。
+日志和日报里都会写明有多少条被排除。
 
 `displayFloor` 控制日报的严格程度。候选少的日子，固定条数的列表会往下捞，
 把明显不相关的项目也塞进精选；有了下限，它们会被单独列在日报末尾的「低置信度」区，
@@ -209,7 +226,7 @@ src/
   digest.mjs            日报渲染（Markdown + JSON）
   store.mjs             SQLite（repos / snapshots / scores / feedback / weights）
 fixtures/sample-repos.json   离线演示与测试数据
-test/                   66 个测试
+test/                   83 个测试
 ```
 
 ## 测试

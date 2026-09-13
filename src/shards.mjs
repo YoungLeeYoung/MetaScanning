@@ -128,7 +128,17 @@ export function expandShard(shard, { day, config } = {}) {
   }
 
   if (!shard.language) {
-    const languages = config?.collection?.languages ?? [];
+    /**
+     * 不往被排除的语言里展开。
+     *
+     * 否则会花请求去拉一堆注定要被丢掉的仓库——实测里一次运行有 324 条
+     * 因为 excluded-language 被淘汰，其中 215 条是 HTML，白花了 3 次请求。
+     * 代价是子分片的并集不再覆盖父分片全集，但被排除掉的那部分本来就不要。
+     */
+    const excluded = new Set((config?.excludes?.languages ?? []).map((lang) => String(lang).toLowerCase()));
+    const languages = (config?.collection?.languages ?? []).filter(
+      (language) => !excluded.has(String(language).toLowerCase()),
+    );
     return languages.map((language) => makeChild({ language }));
   }
 
